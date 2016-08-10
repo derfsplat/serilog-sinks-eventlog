@@ -115,7 +115,12 @@ namespace Serilog.Sinks.EventLog
 	            payload = payload.Substring(0, 31839);
 	        }
 
-            System.Diagnostics.EventLog.WriteEntry(_source, payload, type, (int)logEvent.Level);
-		}
+	        var log = System.Diagnostics.EventLog.GetEventLogs().FirstOrDefault(l => l.Log == _logName);
+	        log.Source = _source;
+	        log.WriteEntry(
+	            message: payload,
+	            type: type,
+	            eventID: (int) logEvent.Level);
+	    }
 	}
 }
