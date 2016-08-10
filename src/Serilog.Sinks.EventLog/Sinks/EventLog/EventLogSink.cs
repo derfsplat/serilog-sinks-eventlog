@@ -13,9 +13,11 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32;
 using Serilog.Core;
 using Serilog.Debugging;
 using Serilog.Events;
@@ -42,7 +44,8 @@ namespace Serilog.Sinks.EventLog
 	    /// <param name="textFormatter">Supplies culture-specific formatting information, or null.</param>
 	    /// <param name="machineName">The name of the machine hosting the event log written to.</param>
 	    /// <param name="manageEventSource">If false does not check/create event source.  Defaults to true i.e. allow sink to manage event source creation</param>
-	    public EventLogSink(string source, string logName, ITextFormatter textFormatter, string machineName, bool manageEventSource)
+	    public EventLogSink(string source, string logName, ITextFormatter textFormatter, string machineName,
+	        bool manageEventSource)
 	    {
 	        if (source == null) throw new ArgumentNullException("source");
 	        if (textFormatter == null) throw new ArgumentNullException("textFormatter");
@@ -65,14 +68,90 @@ namespace Serilog.Sinks.EventLog
 
 	        if (manageEventSource)
 	        {
-	            if (!System.Diagnostics.EventLog.SourceExists(source, machineName))
+	            var exists = true;
+	            System.Diagnostics.EventLog existingLogWithSource = null;
+
+	            if (string.IsNullOrWhiteSpace(logName) && !System.Diagnostics.EventLog.SourceExists(source, machineName))
 	            {
-	                System.Diagnostics.EventLog.CreateEventSource(sourceData);
+	                exists = false;
+	            }
+	            else
+	            {
+	                exists = SourceExistsInLog(source, logName, machineName);
+
+	                if (!exists)
+	                {
+	                    //stash a reference to this guy so we can add a log entry noting the logs your looking for are in the
+	                    //log previously associated with "source"
+	                    existingLogWithSource = GetLogFromSource(source, machineName);
+
+	                    if (existingLogWithSource != null)
+	                    {
+	                        System.Diagnostics.EventLog.DeleteEventSource(source, machineName);
+	                    }
+	                }
+	            }
+
+	            if (exists) return;
+
+	            System.Diagnostics.EventLog.CreateEventSource(sourceData);
+
+	            if (existingLogWithSource != null)
+	            {
+	                var log = System.Diagnostics.EventLog.GetEventLogs().FirstOrDefault(l => l.Log == _logName);
+	                if (log == null)
+	                    return;
+
+	                var metaSource = $"serilog-{_logName}";
+	                if (!System.Diagnostics.EventLog.SourceExists(metaSource, machineName))
+	                    System.Diagnostics.EventLog.CreateEventSource(new EventSourceCreationData(metaSource, _logName)
+	                    {
+	                        MachineName = machineName
+	                    });
+
+	                log.Source = metaSource;
+	                log.WriteEntry(
+	                    message: $"Event source {source} was previously registered in log {existingLogWithSource.Log}. " +
+	                             $"The source has been registered with the new log, {logName}, however a computer restart is required " +
+	                             $"before event logs will appear in {logName} with source {source} instead of {existingLogWithSource.Log}.",
+	                    type: EventLogEntryType.Warning,
+	                    eventID: (int) LogEventLevel.Warning);
 	            }
 	        }
 	    }
 
+	    /// <summary>
+        /// Returns name of EventLog that contains the registered source
+        /// </summary>
+        /// <param name="source"></param>
+        /// <param name="machineName"></param>
+        /// <returns></returns>
+	    private System.Diagnostics.EventLog GetLogFromSource(string source, string machineName)
+	    {
+	        return System.Diagnostics.EventLog.GetEventLogs().ToList().FirstOrDefault(l => SourceExistsInLog(source, l.Log, machineName));
+	    }
+
+	    private bool SourceExistsInLog(string sourceName, string logName, string machineName)
+	    {
+            return FindSourceNamesFromLog(logName, machineName)?.Any(s => s == sourceName) ?? false;
+	    }
+
         /// <summary>
+        /// Returns list of sources associated with specific log
+        /// </summary>
+        /// <remarks>
+        /// EventLog Api doesn't support this natively so we have to use the Registry
+        /// </remarks>
+        private static List<string> FindSourceNamesFromLog(string logName, string machineName)
+        {
+            if (machineName.Trim() == ".") machineName = Environment.MachineName;
+
+            var hive = RegistryKey.OpenRemoteBaseKey(RegistryHive.LocalMachine, machineName);
+            var keyLog = hive.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\Eventlog\{logName}");
+            return keyLog?.GetSubKeyNames().ToList();
+        }
+
+	    /// <summary>
 	    /// Emit the provided log event to the sink.
 	    /// </summary>
 	    /// <param name="logEvent">The log event to write.</param>
